@@ -9,35 +9,19 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from dotenv import load_dotenv
-import asyncpg
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from openai import AsyncOpenAI
+from supabase import create_client, Client
 
 load_dotenv()
 
-# Initialize OpenAI client and PostgreSQL connection parameters
+# Initialize OpenAI and Supabase clients
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# Database configuration from environment variables
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "port": int(os.getenv("DB_PORT", "5432")),
-    "user": os.getenv("DB_USER", "postgres"),
-    "password": os.getenv("DB_PASSWORD"),
-    "database": os.getenv("DB_NAME", "crawl4ai")
-}
-
-# Validate database configuration
-if not DB_CONFIG["password"]:
-    raise ValueError("DB_PASSWORD environment variable is required")
-
-# Global connection pool
-pool = None
-
-async def init_db():
-    global pool
-    pool = await asyncpg.create_pool(**DB_CONFIG)
+supabase: Client = create_client(
+    os.getenv("SUPABASE_URL"),
+    os.getenv("SUPABASE_SERVICE_KEY")
+)
 
 @dataclass
 class ProcessedChunk:
@@ -123,21 +107,15 @@ async def get_embedding(text: str) -> List[float]:
             model="text-embedding-3-small",
             input=text
         )
-        embedding = response.data[0].embedding
-        print(f"Got embedding of length: {len(embedding)}")
-        return embedding
+        return response.data[0].embedding
     except Exception as e:
         print(f"Error getting embedding: {e}")
         return [0] * 1536  # Return zero vector on error
 
 async def process_chunk(chunk: str, chunk_number: int, url: str) -> ProcessedChunk:
     """Process a single chunk of text."""
-    print(f"\nProcessing chunk {chunk_number} for {url}")
-    print(f"Chunk length: {len(chunk)}")
-    
     # Get title and summary
     extracted = await get_title_and_summary(chunk, url)
-    print(f"Got title: {extracted['title']}")
     
     # Get embedding
     embedding = await get_embedding(chunk)
@@ -161,50 +139,29 @@ async def process_chunk(chunk: str, chunk_number: int, url: str) -> ProcessedChu
     )
 
 async def insert_chunk(chunk: ProcessedChunk):
-    """Insert a processed chunk into PostgreSQL."""
+    """Insert a processed chunk into Supabase."""
     try:
-        async with pool.acquire() as conn:
-            data = {
-                "url": chunk.url,
-                "chunk_number": chunk.chunk_number,
-                "title": chunk.title,
-                "summary": chunk.summary,
-                "content": chunk.content,
-                "metadata": json.dumps(chunk.metadata),
-                "embedding": chunk.embedding
-            }
-            
-            print(f"\nInserting chunk {chunk.chunk_number} for {chunk.url}")
-            print(f"Embedding length: {len(data['embedding'])}")
-            
-            query = """
-                INSERT INTO site_pages 
-                (url, chunk_number, title, summary, content, metadata, embedding)
-                VALUES ($1, $2, $3, $4, $5, $6, $7::float[]::vector)
-            """
-            await conn.execute(
-                query,
-                data["url"],
-                data["chunk_number"],
-                data["title"],
-                data["summary"],
-                data["content"],
-                data["metadata"],
-                data["embedding"]
-            )
-            print(f"Successfully inserted chunk {chunk.chunk_number} for {chunk.url}")
+        data = {
+            "url": chunk.url,
+            "chunk_number": chunk.chunk_number,
+            "title": chunk.title,
+            "summary": chunk.summary,
+            "content": chunk.content,
+            "metadata": chunk.metadata,
+            "embedding": chunk.embedding
+        }
+        
+        result = supabase.table("site_pages").insert(data).execute()
+        print(f"Inserted chunk {chunk.chunk_number} for {chunk.url}")
+        return result
     except Exception as e:
         print(f"Error inserting chunk: {e}")
-        print(f"Data that failed: {json.dumps(data, default=str)}")
+        return None
 
 async def process_and_store_document(url: str, markdown: str):
     """Process a document and store its chunks in parallel."""
-    print(f"\nProcessing document: {url}")
-    print(f"Markdown length: {len(markdown)}")
-    
     # Split into chunks
     chunks = chunk_text(markdown)
-    print(f"Split into {len(chunks)} chunks")
     
     # Process chunks in parallel
     tasks = [
@@ -275,23 +232,14 @@ def get_pydantic_ai_docs_urls() -> List[str]:
         return []
 
 async def main():
-    # Initialize the database connection pool
-    await init_db()
+    # Get URLs from Pydantic AI docs
+    urls = get_pydantic_ai_docs_urls()
+    if not urls:
+        print("No URLs found to crawl")
+        return
     
-    try:
-        # Get URLs from Pydantic AI docs
-        urls = get_pydantic_ai_docs_urls()
-        urls = urls[1:2]
-        if not urls:
-            print("No URLs found to crawl")
-            return
-        
-        print(f"Found {len(urls)} URLs to crawl")
-        await crawl_parallel(urls)
-    finally:
-        # Close the connection pool
-        if pool:
-            await pool.close()
+    print(f"Found {len(urls)} URLs to crawl")
+    await crawl_parallel(urls)
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -1,9 +1,6 @@
 -- Enable the pgvector extension
 create extension if not exists vector;
 
--- Drop existing table if it exists
-drop table if exists site_pages;
-
 -- Create the documentation chunks table
 create table site_pages (
     id bigserial primary key,
@@ -11,9 +8,9 @@ create table site_pages (
     chunk_number integer not null,
     title varchar not null,
     summary varchar not null,
-    content text not null,
-    metadata jsonb not null default '{}'::jsonb,
-    embedding vector(1536) not null,
+    content text not null,  -- Added content column
+    metadata jsonb not null default '{}'::jsonb,  -- Added metadata column
+    embedding vector(1536),  -- OpenAI embeddings are 1536 dimensions
     created_at timestamp with time zone default timezone('utc'::text, now()) not null,
     
     -- Add a unique constraint to prevent duplicate chunks for the same URL
@@ -61,3 +58,15 @@ begin
   limit match_count;
 end;
 $$;
+
+-- Everything above will work for any PostgreSQL database. The below commands are for Supabase security
+
+-- Enable RLS on the table
+alter table site_pages enable row level security;
+
+-- Create a policy that allows anyone to read
+create policy "Allow public read access"
+  on site_pages
+  for select
+  to public
+  using (true);
